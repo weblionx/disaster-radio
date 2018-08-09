@@ -47,10 +47,31 @@ byte destination = 0xFF;      // destination to send to default broadcast
 
 bool echo_on = false;
 
+byte routes = 0;
+
+struct routeTableEntry{
+    uint8_t address[6];
+    uint8_t destination[256][6];
+    uint8_t routes;
+    uint8_t metric;
+};
+
+struct routeTableEntry route[17];
+
 /*
   FORWARD-DEFINED FUNCTIONS
 */
-void sendMessage(char* outgoing, int outgoing_length) {
+
+/*char* stringToArray(const char* input, int length){
+    char output[length]; 
+    for( int i = 0 ; i < length ; i++ ){
+        output[i] = input[i]; 
+    }
+    return output;
+}
+*/
+
+void sendMessage(uint8_t* outgoing, int outgoing_length) {
     LoRa.beginPacket();
     for( int i = 0 ; i < outgoing_length ; i++){
         LoRa.write(outgoing[i]);
@@ -58,34 +79,34 @@ void sendMessage(char* outgoing, int outgoing_length) {
     LoRa.endPacket();
 }
 
-void storeMessage(char* message, int message_length) {
-  //store full message in log file
-  File log = SPIFFS.open("/log.txt", "a");
-  if(!log){
-    Serial.printf("file open failed");
-  }
-  for(int i = 0 ; i <= message_length ; i++){
-    log.printf("%c", message[i]);
-  }
-  log.printf("\n");
-  log.close();
+void storeMessage(uint8_t* message, int message_length) {
+    //store full message in log file
+    File log = SPIFFS.open("/log.txt", "a");
+    if(!log){
+        Serial.printf("file open failed");
+    }
+    for(int i = 0 ; i <= message_length ; i++){
+        log.printf("%c", message[i]);
+    }
+    log.printf("\n");
+    log.close();
 }
 
-//TODO conver string to char array
+//TODO convert string to char array
 String dumpLog() {
-  String dump = "";
-  File log = SPIFFS.open("/log.txt", "r");
-  if(!log){
-    Serial.printf("file open failed");
-  }  
-  Serial.print("reading log file: \r\n");
-  while (log.available()){
-    //TODO replace string with char array
-    String s = log.readStringUntil('\n');
-    dump += s;
-    dump += "\r\n";
-  }
-  return dump;
+    String dump = "";
+    File log = SPIFFS.open("/log.txt", "r");
+    if(!log){
+        Serial.printf("file open failed");
+    }  
+    Serial.print("reading log file: \r\n");
+    while (log.available()){
+        //TODO replace string with char array
+        String s = log.readStringUntil('\n');
+        dump += s;
+        dump += "\r\n";
+    }
+    return dump;
 }
 
 void clearLog() {
@@ -93,27 +114,63 @@ void clearLog() {
   log.close();
 }
 
+void parseRoute(uint8_t *buf, int length) {
+   
+    int next_entry = 1;
+    for( int i = 0; i < 6; i++){
+        route[next_entry].address[i] = buf[4+i]; 
+    }
+
+    int routes = (length-10)/6;
+    for( int i = 0; i < routes; i++){
+        for( int j = 0; j < 6; j++){
+            route[next_entry].destination[i][j] = buf[(6*i)+j+10]; 
+        }
+    }
+
+}
 
 /*
   CALLBACK FUNCTIONS
 */
 void onReceive(int packetSize) {
-     Serial.printf("GOT PACKET!\r\n");
+    Serial.printf("GOT PACKET!\r\n");
     if (packetSize == 0) return;          // if there's no packet, return
 
-    // read packet header bytes:
-    //int recipient = LoRa.read();          // recipient address
-    //byte sender = LoRa.read();            // sender address
-    //byte incomingMsgId = LoRa.read();     // incoming msg ID
-    //byte incomingLength = LoRa.read();    // incoming msg length
 
-    char incoming[BUFFERSIZE];                 // payload of packet
+
+    uint8_t incoming[BUFFERSIZE];                 // payload of packet
 
     int incomingLength = 0;
     while (LoRa.available()) { 
         incoming[incomingLength] = (char)LoRa.read(); 
         incomingLength++;
     }
+
+    // read packet header bytes:
+    uint8_t seq1 = incoming[0];   // open byte one 
+    uint8_t seq2 = incoming[1];   // open byte two 
+    uint8_t type = incoming[2];   // identifies message type 
+    uint8_t pipe = incoming[3];   // breaks header for error check 
+
+    
+    if (pipe != '|') return;
+
+    
+    switch(type){
+        case 'b': 
+            parseRoute(incoming, incomingLength);
+            break;
+        case 'c': 
+            //parseChat();
+            break;
+        case 'm': 
+            //parseMap();
+            break;
+
+    }
+
+    //TODO refresh on case statements
 
     /* TODO: fix error check once garbling solved
     if (incomingLength != i) {   // check length for error
@@ -225,9 +282,9 @@ void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventT
 //	    Serial.print(dumpLog());
 	    
             //transmit message over LoRa
-            if(loraInitialized) {
+            /*if(loraInitialized) {
               sendMessage(msg, msg_length);
-            }
+            }*/
 
             //echoing message to ws
             if(echo_on){
@@ -296,15 +353,15 @@ void spiffsSetup(){
 }
 
 void mdnsSetup(){
-  if(!MDNS.begin("disaster")){
-    Serial.printf("Error setting up mDNS\r\n");
-    while(1) {
-      delay(1000);
+    if(!MDNS.begin("disaster")){
+        Serial.printf("Error setting up mDNS\r\n");
+        while(1) {
+            delay(1000);
+        }
     }
-  }
-  Serial.printf("mDNS responder started\r\n");
+    Serial.printf("mDNS responder started\r\n");
       
-  MDNS.addService("http", "tcp", 80);
+    MDNS.addService("http", "tcp", 80);
 }
 
 void webServerSetup(){
@@ -415,6 +472,63 @@ void loraSetup(){
     Serial.printf("%s\r\n", macaddr);
 }
 
+
+void broadcastRoute(uint8_t sequence, uint8_t entry){
+
+    // initalize message with header
+    uint8_t route_message[256] = { sequence, entry, 'b', '|' };
+    int message_length = 4;
+
+    //char route_message[256] = "01b|";
+    
+    Serial.printf("entry header");
+    Serial.printf("\r\n");
+
+    // append node's mac address
+    for( int i = 5 ; i >= 0  ; i--){
+        route_message[message_length] = mac[i];
+        message_length++;
+    }
+
+    // append next hop mac address
+    for( int i = 0 ; i < 6 ; i++){
+        route_message[message_length] = route[entry].address[i];
+        message_length++;
+    }
+
+    /*for( int i = 0 ; i < 4 ; i++){
+        Serial.printf(" %c ", route_message[i]);
+    }
+    */
+
+    // append destination mac addresses
+    for( int i = 0 ; i < route[entry].routes; i++){
+        for( int j = 0 ; j < 6 ; j++){
+            route_message[message_length] = route[entry].destination[i][j];
+            message_length++;
+        }
+    }
+
+    for( int i = 0 ; i < message_length; i++){
+        Serial.printf(" %02x ", route_message[i]);
+    }
+    Serial.printf("\r\n");
+
+/*
+    Serial.printf("sending routing table entry of length %d", message_length);
+    Serial.printf("\r\n");
+
+    sendMessage(route_message, message_length);
+
+    for( int i = 0 ; i <= message_length ; i++){ 
+        Serial.printf("%c", route_message[i]);
+    }
+    Serial.printf("\r\n");
+    */
+
+}
+
+
 /*
   START MAIN
 */
@@ -434,6 +548,27 @@ void setup(){
     webServerSetup();
 
     loraSetup();
+
+    // this is a terrible way of initializing this, but 
+    route[0].address[0] = 0x01; 
+    route[0].address[1] = 0xC1; 
+    route[0].address[2] = 0x44; 
+    route[0].address[3] = 0x67; 
+    route[0].address[4] = 0xB1; 
+    route[0].address[5] = 0x87; 
+
+    route[0].metric = 10;
+    route[0].routes = 3;
+
+    route[0].destination[0][0] = 0x10; 
+    route[0].destination[0][5] = 0x11;
+
+    route[0].destination[1][0] = 0x20, 
+    route[0].destination[1][5] = 0x12;
+
+    route[0].destination[2][0] = 0x30, 
+    route[0].destination[2][5] = 0x13;
+
 }
 
 int interval = 1000;          // interval between sends
@@ -441,29 +576,30 @@ long lastSendTime = 0; // time of last packet send
 
 void loop(){
 
-  int packetSize;
+    int packetSize;
 
+    // broadcast routing table every 3 seconds
     if (millis() - lastSendTime > interval) {
-      int packetSize = LoRa.parsePacket();
-      Serial.printf("checking for data: %d\r\n", packetSize); 
-      if(packetSize) {
-        onReceive(packetSize);
-      }
-      lastSendTime = millis();
-    }
-
-    /* uncomment to enable BEACON mode
-    if (millis() - lastSendTime > interval) {
-        int test_length = 26;
-        char test_message[252] = "FFc|<morgan> HeLoRa World! ";   // send a message
-        Serial.printf("Sending:");
-        for( int i = 0 ; i <= test_length ; i++){
-            Serial.printf("%c", test_message[i]);
+        
+        // Print current routing table
+        /*
+        for( int i = 0 ; i < route[0].routes ; i++){
+            for( int j = 0 ; j < 12 ; j++){
+                Serial.printf("%c", route[0].destination[i][j]);
+                Serial.printf(" via ");
+                for( int k = 0 ; k < 12 ; k++){
+                    Serial.printf("%c", route[0].address[k]);
+                }
+            }
         }
         Serial.printf("\r\n");
-        sendMessage(test_message, test_length);
+        */
+	
+        // Send routing entry
+        broadcastRoute(0, 0);
+
         lastSendTime = millis();            // timestamp the message
-        interval = random(2000) + 1000;    // 2-3 seconds
-    }*/ 
+        interval = random(2000) + 4000;    // 2-3 seconds
+    }
 
 }
